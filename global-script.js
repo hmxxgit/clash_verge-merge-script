@@ -1,6 +1,7 @@
 // Paste the entire file into Clash Verge Rev's GLOBAL extension script.
 // Online rule sets are refreshed by Mihomo every 604800 seconds (7 days).
-// This file does not create nodes or change DNS, TUN, or the proxy mode.
+// Only synchronize manual domain DNS policies when paired with the Merge file.
+// Never create nodes or change TUN, ports, or the proxy mode.
 function main(config, profileName) {
   const WEEK_SECONDS = 604800;
   // Official alternate: https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/
@@ -12,19 +13,27 @@ function main(config, profileName) {
     ["hmxx-cn-cidr", "cncidr", "ipcidr"]
   ];
 
-  // Preserve all other subscription-provided rule sets.
+  // 同名但定义不同的订阅 provider 保留；为本脚本选择独立名称。
   config["rule-providers"] = { ...(config["rule-providers"] || {}) };
-  for (const [name, file, behavior] of sources) {
-    config["rule-providers"][name] = {
-      type: "http",
-      behavior,
-      format: "yaml",
+  const providerNames = {};
+  for (const [baseName, file, behavior] of sources) {
+    let name = baseName;
+    let suffix = 2;
+    const definition = candidate => ({
+      type: "http", behavior, format: "yaml",
+      // 上游 .txt 实际是 payload: YAML，不是逐行 text。
       url: BASE_URL + file + ".txt",
-      path: "./ruleset/" + name + ".yaml",
-      interval: WEEK_SECONDS,
-      // GLOBAL is Mihomo's built-in group, independent of subscription group names.
-      proxy: "GLOBAL"
-    };
+      path: "./ruleset/" + candidate + ".yaml",
+      interval: WEEK_SECONDS, proxy: "GLOBAL"
+    });
+    while (config["rule-providers"][name] &&
+      !(Object.keys(config["rule-providers"][name]).length === Object.keys(definition(name)).length &&
+        Object.entries(definition(name)).every(([key, value]) =>
+          config["rule-providers"][name][key] === value))) {
+      name = baseName + "-" + suffix++;
+    }
+    providerNames[baseName] = name;
+    config["rule-providers"][name] = definition(name);
   }
 
   // Your existing explicit direct-routing policy, with repeated entries removed.
@@ -153,23 +162,52 @@ function main(config, profileName) {
   ];
 
   const managedRules = [...new Set([
-    "RULE-SET,hmxx-cn-private,DIRECT",
-    "RULE-SET,hmxx-cn-lan,DIRECT,no-resolve",
+    "RULE-SET," + providerNames["hmxx-cn-private"] + ",DIRECT",
+    "RULE-SET," + providerNames["hmxx-cn-lan"] + ",DIRECT,no-resolve",
     ...customDirectRules,
-    "RULE-SET,hmxx-cn-direct,DIRECT",
-    // Allow DNS resolution here so mainland IPs can be recognized for domain requests.
-    "RULE-SET,hmxx-cn-cidr,DIRECT"
+    "RULE-SET," + providerNames["hmxx-cn-direct"] + ",DIRECT"
   ])];
-  const normalize = rule => typeof rule === "string"
-    ? rule.split(",").map(part => part.trim()).join(",")
-    : rule;
-  const managed = new Set(managedRules.map(normalize));
-  const originalRules = Array.isArray(config.rules) ? config.rules : [];
+  const cidrRule = "RULE-SET," + providerNames["hmxx-cn-cidr"] + ",DIRECT";
+  let originalRules = Array.isArray(config.rules) ? config.rules.slice() : [];
+  const isMatch = rule => typeof rule === "string" && rule.split(",")[0].trim() === "MATCH";
 
-  // Remove old copies FIRST, then prepend. A copy below MATCH must never stay there.
-  config.rules = [
-    ...managedRules,
-    ...originalRules.filter(rule => !managed.has(normalize(rule)))
-  ];
+  // 只移除完整的本脚本前缀及其配套 IP 插入项；不去重订阅原文。
+  // 即使经过 JSON/YAML 保存再执行，也保持幂等。
+  if (managedRules.every((rule, index) => originalRules[index] === rule)) {
+    originalRules = originalRules.slice(managedRules.length);
+    const match = originalRules.findIndex(isMatch);
+    const inserted = match < 0 ? originalRules.length - 1 : match - 1;
+    if (originalRules[inserted] === cidrRule) originalRules.splice(inserted, 1);
+    // 兼容旧版本把大陆 IP 紧接在前缀后的生成配置。
+    else if (originalRules[0] === cidrRule) originalRules.shift();
+  }
+  // 大陆 IP 仅作为 MATCH 前的补充，先尊重订阅中全部具体规则。
+  // 无 MATCH 时放到末尾；不创建或改写兜底策略。
+  const match = originalRules.findIndex(isMatch);
+  originalRules.splice(match < 0 ? originalRules.length : match, 0, cidrRule);
+  config.rules = [...managedRules, ...originalRules];
+
+  // Merge 先执行，Script 后执行。复用 Merge 的国内 DNS，不维护第二份名单。
+  const dns = config.dns;
+  const policy = dns && dns["nameserver-policy"];
+  const domestic = policy && (policy["rule-set:hmxx-cn-direct"] ||
+    policy["rule-set:" + providerNames["hmxx-cn-direct"]]);
+  if (domestic) {
+    const providerKey = "rule-set:" + providerNames["hmxx-cn-direct"];
+    if (providerKey !== "rule-set:hmxx-cn-direct") {
+      delete policy["rule-set:hmxx-cn-direct"];
+      policy[providerKey] = domestic;
+    }
+    for (const rule of customDirectRules) {
+      const [type, domain] = rule.split(",");
+      // KEYWORD 无等价 DNS policy 语义，禁止转换成后缀或通配符。
+      // localhost 保持系统解析，不能发给公共国内 DoH。
+      if (domain === "localhost") continue;
+      if (type === "DOMAIN" || type === "DOMAIN-SUFFIX") {
+        policy[type === "DOMAIN" ? domain : "+." + domain] =
+          Array.isArray(domestic) ? domestic.slice() : domestic;
+      }
+    }
+  }
   return config;
 }

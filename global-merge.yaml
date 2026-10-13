@@ -80,6 +80,7 @@ dns:
       - "https://dns.alidns.com/dns-query#DIRECT"
       - "https://doh.pub/dns-query#DIRECT"
     # 本地名字交给当前网络的系统解析器，不硬编码家中路由器地址。
+    "localhost": system
     "+.lan": system
     "+.local": system
     "+.localhost": system
