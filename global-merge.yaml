@@ -1,0 +1,4 @@
+# Paste into the GLOBAL extension merge configuration.
+# Rule providers and rule ordering are handled by global-script.js.
+profile:
+  store-selected: true
