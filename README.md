@@ -10,16 +10,9 @@
 
 ### 1. 全局扩展覆写配置（Merge）
 
-完整内容见 [global-merge.yaml](global-merge.yaml)：
+打开 [global-merge.yaml](global-merge.yaml)，完整复制到该选项中。该文件现在包含完整 DNS 配置、Fake-IP 排除列表、解析路径和缓存设置，具体说明见下文“DNS 与通用覆写”。**必须搭配本仓库的全局脚本**，因为 DNS 政策引用脚本注册的 `hmxx-cn-direct` 规则集。
 
-```yaml
-profile:
-  store-selected: true
-```
-
-它保留当前选中节点的缓存设置。所有在线规则集定义和前置逻辑都放在下面的脚本中，因此不要另外在 Merge 中写 `rules:`；列表覆写可能丢掉机场原有规则。
-
-如果你自己还有其他必要的全局 Merge 设置，保留它们，不必只留下这一项。
+所有在线规则集定义和前置逻辑仍由脚本管理，不要另外在 Merge 中写 `rules:`；列表覆写可能丢掉机场原有规则。如果你有自己的 DNS/hosts 等定制，先与此文件核对再替换。
 
 ### 2. 全局扩展脚本（Script）
 
@@ -30,6 +23,44 @@ profile:
 本次没有擅自删除你原有的国际业务域名或较宽的 `DOMAIN-KEYWORD,doubao`、`.cn` 等规则。这些是你之前的直连选择，并不保证每个服务在任何网络都可直连。例如 `bilibili.tv`、`alibaba.com`、`alibabacloud.com`、`tmall.hk`、`jd.hk` 也仍在自定义列表中；若你不想强制某项直连，在 `customDirectRules` 中删除对应条目即可。
 
 保存后点一次“重新激活订阅”，在“查看运行时订阅”中检查生成的 `rules`。使用 **规则模式**；全局代理模式或直连模式不会按这份分流列表工作。
+
+## DNS 与通用覆写
+
+新版本基于本机原有的 Fake-IP、IPv4、缓存和本地排除列表补全；主要变化是把“所有网站都用国内 DNS”改成明确的国内/其他域名解析路径。
+
+| 字段/模块 | 本方案的内容 | 作用 |
+|---|---|---|
+| `tcp-concurrent` | `true` | 允许并发拨号 |
+| `profile` | 保存选择和 Fake-IP 映射 | 重新加载时复用缓存 |
+| DNS 监听 | `127.0.0.1:1053` | 本机 DNS 服务，不对局域网开放 |
+| `enhanced-mode` | `fake-ip` | 给普通域名建立虚拟地址映射 |
+| 排除列表 | 本地、联网检测、NTP、部分登录域名 | 这些域名返回实际解析结果，不返回 Fake-IP |
+| `cache-algorithm` | `arc` | DNS 缓存策略 |
+| `prefer-h3` | `false` | 不强制通过 HTTP/3 查询 DoH |
+| `respect-rules` | `true` | DNS 上游连接遵循分流；下述 DIRECT 设置明确绕过分流 |
+| 引导 DNS | `223.5.5.5`、`119.29.29.29` | 找到国内 DoH 服务器地址；这一环节仍是普通 DNS |
+| 节点域名 DNS | 阿里/腾讯 DoH，明确 `#DIRECT` | 在代理连接建立前解析服务器域名，避免循环依赖 |
+| 直连出口 DNS | 阿里/腾讯 DoH，遵循域名 policy | 解析直接连接的目的地 |
+| 默认网站 DNS | Cloudflare/Google DoH，明确 `#RULES` | 未匹配国内或本地政策的域名，通过现有分流查询 |
+| 大陆域名政策 | `rule-set:hmxx-cn-direct`、`.cn` | 使用国内 DoH；与每周更新的直连域名集合保持一致 |
+| 本地域名政策 | `.lan`、`.local`、`.home.arpa` 等 → `system` | 使用当前网络的系统解析器，不硬编码某一台路由器 |
+| `fallback` | 清空 | 避免混入机场另一套 fallback 分类 |
+
+没有为 YouTube 或其他海外服务指定节点或专用策略组，也没有使用一个固定机场的节点名。`#RULES` 跟随你当前的现有分流，通常落到原订阅的代理兜底规则；**它不是保证强制代理**，如果你把该路径选择为 DIRECT，查询也会尝试直连。需要配置本身有可用的代理路径，默认境外 DoH 才能正常访问。
+
+`proxy-server-nameserver` 与默认网站 DNS 是两条不同的路径。前者明确直连，后者可以经过已建立的代理，因此不存在“必须先连接节点才能解析节点地址”的设计循环。域名指向的代理地址本身若被国内解析器限制，仍需单独的节点域名政策；这份通用模板不保证所有机场域名都可解析。
+
+这里没有写 `tun`、系统代理开关、监听代理端口、`mode` 或 `unified-delay`。这些由 Clash Verge 设置控制，写进扩展不一定生效。仅设置 DNS `listen` 也不会自动把系统 DNS 接管过来，正常使用仍需你已开启的 TUN DNS 接管或相应应用代理设置。
+
+DNS 的 IPv6 默认关闭，贴合当前 IPv4 代理环境。Clash 的 DNS 覆写页面若启用了 IPv6，可能覆盖 `dns.ipv6`；应用设置优先级见[官方扩展说明](https://www.clashverge.dev/guide/extend.html)。若需要 IPv6，请同时核对应用开关与此配置。
+
+### DNS 覆写的优先级
+
+这份全局 Merge 提供的是一套明确的默认 DNS。**它会替换相应的机场 DNS 列表和政策**，并非保留机场 DNS 不变。新版本 Clash Verge 对 DNS/hosts 的合并细节也有变化，使用前应看生成的最终运行配置。
+
+订阅自己的 Merge/Script 仍在全局扩展之后执行，可以重新改写 DNS。若某个配置的 DNS 没有按这份模板生效，检查该订阅的 DNS 扩展，而不要反复只改全局内容。原脚本继续保留输入中的 DNS，不会覆盖这份 Merge；这是两部分的职责分工。
+
+完整字段含义和 `#DIRECT` / `#RULES` 的行为依据：[Mihomo DNS 文档](https://wiki.metacubex.one/config/dns/)。
 
 ## 搜索和选择的规则集
 
@@ -116,6 +147,7 @@ node --test tests/global-script.test.cjs
 ## 参考文档
 
 - [Mihomo rule providers：格式、更新间隔和下载代理](https://wiki.metacubex.one/config/rule-providers/)
+- [Mihomo DNS：解析路径、Fake-IP、域名政策和代理参数](https://wiki.metacubex.one/config/dns/)
 - [Clash Verge Rev：全局及订阅扩展的作用范围、合并规则、执行顺序](https://www.clashverge.dev/guide/extend.html)
 - [Loyalsoldier：规则文件、来源、官方备用下载地址](https://github.com/Loyalsoldier/clash-rules)
 
