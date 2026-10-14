@@ -1,5 +1,87 @@
 # 验证记录
 
+## 跨平台架构改造（2026-10-14）
+
+本节为当前版本；下方 2026-10-13 记录保留用于对照。没有操作宿主机现有 Clash 全局扩展、DNS/系统代理/TUN/模式或节点选择。所有核心检查使用临时工作目录和 loopback 测试端口；浏览器检查使用独立 headless Chrome 配置。
+
+### 架构与兼容性核对
+
+共享源为 core/dns.yaml、core/direct-rules.json、core/providers.json、core/transform.js。构建生成 Verge 双文件、自包含 FlClash/Clash Mi 脚本、通用转换器及单文件浏览器合成器。适配器自身无外部 JS 模块依赖，转换返回独立副本。120 条原有规则通过审查前基线的 SHA-256 检查，未删减；大陆 CIDR 仍在原具体规则后、首个 MATCH 前。
+
+已完整阅读原有两个核心文件、README、VALIDATION 及测试，保留原 7 项行为用例；原 Node 测试中的 YAML 读取改用锁定的 js-yaml 开发依赖，不再让 npm test 依赖 Ruby。
+
+客户端入口、引擎、顺序、YAML 覆写模型、文件导入、VPN/DNS 机制及证据 commit 见 [docs/CLIENTS.md](docs/CLIENTS.md)。确认 Verge 双层扩展、FlClash QuickJS main(config)、CMFA 类型化覆写与完整 YAML 导入、Clash Mi iOS/Mihomo 和 flutter_js main(config) 补丁。**没有在这些 App 或 Android/iOS 真机上执行适配器**，不把源码确认或桌面浏览器手机尺寸测试记作手机运行验收。
+
+共享 DNS 不含 listen；独立配置校验确认未注入 TUN/模式/代理端口。自包含适配器保留输入的监听地址和未知 DNS 字段、无关 DNS policy、blacklist 过滤项；客户端重写的 provider 缓存路径也复用，重复转换不改回路径、不重复规则。
+
+### 测试命令与结果
+
+```sh
+npm ci --ignore-scripts
+npm test
+node tests/mihomo-configs.cjs /path/to/mihomo
+python3 tests/mihomo-smoke.py --core /path/to/mihomo
+python3 tests/mihomo-smoke.py --core /path/to/mihomo --adapter adapters/flclash.js
+# 可选真实浏览器检查，需要 Playwright 模块和已安装的 Chrome：
+node tests/browser-smoke.cjs
+npm audit --omit=optional
+```
+
+本机 core 为 `/Applications/Clash Verge.app/Contents/MacOS/verge-mihomo`，版本 v1.19.32（darwin arm64）。网络 smoke 使用 --proxy 默认的既有本地 HTTP 代理，仅作为隔离核心的测试出站；未改变该代理的设置。Python smoke 延用 Ruby 标准 YAML 库解析真实上游，其他测试/CLI 不依赖 Ruby。浏览器测试的 Playwright 来自本机开发工具包，通过 NODE_PATH 提供；未向手机客户端引入此依赖。
+
+| 检查 | 结果 | 实测范围 |
+|---|---|---|
+| npm test | **22 项全部通过** | 语法/YAML、生成一致性、120 条基线、原订阅不变、节点/多代理组/proxy-providers 不变、别名冲突、序列化幂等、无 MATCH/空配置、DNS policy、缓存路径重写、CLI 隐私及离线 HTML |
+| mihomo-configs.cjs | **20 次 -t 全部通过** | 四种适配路径各四个 fixture + 四份合成 YAML；无节点、无 MATCH、多组与 proxy-providers、provider 冲突。使用小型离线 fixture 缓存，不冒称真实上游验证 |
+| Verge Merge→Script 网络 smoke | **通过** | 真实上游、GLOBAL 下载、四规则集加载/刷新、公网 DNS、UDP Fake-IP、受控路由/DNS、失败缓存及已有连接 |
+| FlClash 自包含 Script 网络 smoke | **通过** | 不先注入 Merge，仅使用临时 DNS listen；与上行相同测试。运行的是独立 Mihomo，而非 FlClash App |
+| Chrome 离线 UI | **通过** | file:// 打开、390×844 尺寸、CMFA 空节点拒绝、文件选择、生成并下载 YAML、原节点/组保持、编辑后旧下载失效、错误不含凭据片段、清空；无 HTTP 请求/页面异常 |
+| npm audit | **0 个已报告漏洞** | 锁定 js-yaml 5.4.3 开发/合成器依赖；客户端扩展不依赖此库 |
+| git diff --check / LICENSE | **通过 / 未修改** | 新旧文件与许可证检查 |
+
+### 当前真实上游数据
+
+两个网络 smoke 分别下载原始上游，确认四个 .txt 是 YAML payload，格式 yaml、行为 domain/ipcidr 和 .yaml 缓存保持。初始载入数量与 YAML payload 数一致，主动更新四个 provider 均成功。direct 集合较昨日减少条目，是上游更新，不是本项目删减手动规则。
+
+| Provider | 字节数 | 原始 payload 数 / 内核条目数 |
+|---|---:|---:|
+| hmxx-cn-private | 3,478 | 130 / 130 |
+| hmxx-cn-lan | 341 | 18 / 18 |
+| hmxx-cn-direct | 2,287,419 | 110,614 / 110,614 |
+| hmxx-cn-cidr | 210,825 | 9,609 / 9,609 |
+
+原始下载 SHA-256：
+
+```text
+hmxx-cn-private: 3a04b128200ef8097d73b1496cbb23d24bc1e05d42fffb09f07c51699efb00b2
+hmxx-cn-lan: 82920b241dc328f1dc99849cf733ed8675a00a4ee0bdf64c892b332dfb7e1e2e
+hmxx-cn-direct: 8b5a1eb6595bd1c23e39f65df75e2129ca65c0b6273024dcf725ef4d999438fa
+hmxx-cn-cidr: 0db34dd0446a376f5a8a2948b1878acd4a4b697025c7c02df3e56e4fd876c352
+```
+
+### DNS、Fake-IP 和出口结果
+
+- 公网 DNS API 查询百度、Google、YouTube 均返回真实 A 记录；UDP 普通域名返回 198.18.*，Apple 检测域名返回真实公网地址。
+- 受控 DNS：豆包/QQ/Bilibili 子域名和非手动名单的上游 direct 探针命中国内解析器；默认外国探针和仅包含 doubao 关键词的域名命中境外解析器。关键词未错误变为 DNS 后缀 policy。
+- 节点域名在连接建立前使用节点专用国内解析器，实际完成 fixture HTTP CONNECT，不依赖默认外国 DNS 的代理路径。
+- 海外测试域名、Google 和 YouTube 的测试子域名均模拟为 223.5.5.5，仍通过原订阅明确的代理规则完成实际 HTTP 请求；未被原具体规则匹配的大陆 IP 命中 cncidr DIRECT。公网 Google/YouTube 播放或 TLS 页面访问未验收，不能从测试 HTTP 响应推断流媒体体验。
+- Apple/Windows/NTP/QQ/微信列出的特殊域名经 UDP 返回真实标记地址，而非 Fake-IP；此项不代表 App 完整登录/通话测试。
+- 每个网络 smoke 对四个 provider 各执行 HTTP 503、损坏 YAML 两种更新失败，共 8 次；两次运行共 **16 次失败更新**。逐次检查磁盘字节及已加载条目数保留，同时已打开的 SOCKS→DIRECT 流仍收到更新前后的 abc/def。
+- 当前生成顺序保留原所有具体规则，再插入 CIDR，原 MATCH 出口未改动。重复转换原对象/序列化产物和客户端改写缓存路径后的产物均无额外规则。
+
+### 未验证项目与限制
+
+1. 未运行 Android/iOS/Windows/Linux App，未运行 FlClash QuickJS 或 Clash Mi iOS flutter_js；仅按官方源码确认入口并验证 JS/内核产物。应用覆写/最终回写、手机本地 HTML、VPN DNS/IPv6/系统 Private DNS 和 mDNS 实际行为需设备验收。
+2. 核心实测版本仅 v1.19.32；CMFA 的 android-real 内核及其他 App 的内置版本可能不同。核心 -t 不等同于该客户端接受配置，也不会接管宿主机 DNS。
+3. 没有真实等待七天或测试休眠/重启的计时；604800 秒配置与主动刷新已验证。GLOBAL 不保证可用节点；无有效缓存的首次下载失败不能保证国内分类生效。
+4. CMFA 导入的是派生快照，无 JS 更新挂钩。机场原文更新需重新合成；四个 rule providers 独立自动刷新。原始订阅、其 URL 和字节内容未被修改。
+5. 空节点配置在裸 Mihomo -t 可通过，CMFA 源码和合成器目标检查会拒绝；不会为适配创建节点。没有代理时，默认境外加密 DNS/境外连接可能无法完成。
+6. 现有宽泛 DIRECT/上游 direct 集合保留，包含部分海外服务，可能覆盖原机场规则。原机场宽泛提前规则也可能让新增 CN IP 兜底无法到达。更具体的用户 DNS policy 与后续客户端覆写仍可影响结果。
+7. 浏览器合成器只处理本地完整 YAML；没有托管服务、订阅 URL 抓取或匿名第三方转换。iOS 本地 HTML 不保证执行，建议电脑合成后传文件或自信任 HTTPS 托管。派生 YAML 含原凭据，应私下保管。
+8. 原来的独立 DNS listen 1053 从共享默认值移出；既有外部程序如依赖该端口，需要由自己的客户端配置显式保持。不得把相同 DNS 默认策略误认为相同系统接管方式。
+
+## 历史验证（2026-10-13）
+
 ## 本次 Code Review / Bug Fix（2026-10-13）
 
 环境：macOS、Clash Verge 自带 Mihomo **v1.19.32**，独立临时工作目录和 loopback 端口。未修改用户 Clash 的节点、代理组、订阅、全局扩展或应用开关。所有测试核心、线程和临时文件在退出时清理。

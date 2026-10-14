@@ -23,6 +23,7 @@ from urllib.parse import urlparse
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--core', required=True)
+parser.add_argument('--adapter', default='global-script.js', help='Repo-relative self-contained adapter; default uses Merge then legacy Script')
 parser.add_argument('--node', default='node')
 parser.add_argument('--ruby', default='ruby', help='Ruby with its standard YAML library')
 parser.add_argument('--proxy', default='http://127.0.0.1:7897')
@@ -51,7 +52,7 @@ def controlled_checks(config, home, path, api, udp_a, mixed):
             qtype = struct.unpack('!H', data[offset+1:offset+3])[0]
             count = 1 if qtype == 1 else 0
             header = data[:2] + struct.pack('!5H', 0x8180, 1, count, 0, 0)
-            answer = b'' if not count else b'\xc0\x0c'+struct.pack('!2HIH', 1, 1, 60, 4)+socket.inet_aton('223.5.5.5' if domain == 'overseas.validation.hmxxgit.org' else self.server.address)
+            answer = b'' if not count else b'\xc0\x0c'+struct.pack('!2HIH', 1, 1, 60, 4)+socket.inet_aton('223.5.5.5' if domain in ['overseas.validation.hmxxgit.org', 'hmxx-routing.google.com', 'hmxx-routing.youtube.com'] else self.server.address)
             sock.sendto(header+data[12:end]+answer, self.client_address)
     dns_servers = []
     for kind, address in [('domestic', '127.0.0.1'), ('foreign', '127.0.0.2')]:
@@ -107,7 +108,8 @@ def controlled_checks(config, home, path, api, udp_a, mixed):
         fixture['proxies'].append({'name': 'controlled-proxy', 'type': 'http',
             'server': 'node.fixture.test', 'port': http_server.server_port})
         fixture['proxy-groups'][0]['proxies'].append('controlled-proxy')
-        fixture['hosts'] = {'overseas.validation.hmxxgit.org': '223.5.5.5'}
+        routing_domains = ['overseas.validation.hmxxgit.org', 'hmxx-routing.google.com', 'hmxx-routing.youtube.com']
+        fixture['hosts'] = {domain: '223.5.5.5' for domain in routing_domains}
         # Only test-fixture URLs/resolvers/nodes change; production files stay untouched.
         for name, provider in fixture['rule-providers'].items():
             provider['url'] = 'http://127.0.0.1:'+str(http_server.server_port)+'/'+name
@@ -146,13 +148,14 @@ def controlled_checks(config, home, path, api, udp_a, mixed):
             if not addresses or any(ip.startswith('198.18.') for ip in addresses):
                 raise RuntimeError('Fake-IP exclusion failed for '+domain)
             filter_answers[domain] = addresses
-        resolved = api('/dns/query?name=overseas.validation.hmxxgit.org&type=A')
-        if [a['data'] for a in resolved.get('Answer', []) if a.get('type') == 1] != ['223.5.5.5']:
-            raise RuntimeError('Overseas fixture did not resolve to a mainland IP')
-        # A real website request: even when its IP is mainland, explicit proxy DOMAIN wins.
-        response = subprocess.check_output(['curl','-sS','--noproxy','','--proxy',
-            'http://127.0.0.1:'+str(mixed),'--max-time','10','http://overseas.validation.hmxxgit.org/check'])
-        if response != b'isolated-proxy': raise RuntimeError('Overseas routing failed: '+repr(response[:200])+'\n'+(home/'core.log').read_text()[-2500:])
+        # Explicit overseas/Google/YouTube rules win even with a mainland A record.
+        for domain in routing_domains:
+            resolved = api('/dns/query?name='+domain+'&type=A')
+            if [a['data'] for a in resolved.get('Answer', []) if a.get('type') == 1] != ['223.5.5.5']:
+                raise RuntimeError('Routing fixture did not resolve to a mainland IP: '+domain)
+            response = subprocess.check_output(['curl','-sS','--noproxy','','--proxy',
+                'http://127.0.0.1:'+str(mixed),'--max-time','10','http://'+domain+'/check'])
+            if response != b'isolated-proxy': raise RuntimeError('Overseas routing failed: '+repr(response[:200])+'\n'+(home/'core.log').read_text()[-2500:])
         if 'node.fixture.test' not in queries['domestic'] or 'node.fixture.test' in queries['foreign']:
             raise RuntimeError('Proxy server hostname used the wrong DNS path')
         # Unmatched literal mainland IP must hit the supplemental provider, not MATCH.
@@ -192,6 +195,7 @@ def controlled_checks(config, home, path, api, udp_a, mixed):
         return {'dns_policy_answers': dns_answers, 'upstream_policy_probe': probe,
             'fake_ip_filter_answers': filter_answers, 'node_hostname_domestic_dns': True,
             'overseas_domain_with_mainland_ip': 'subscription proxy retained',
+            'explicit_google_youtube_proxy_rules': 'both preserved and routed through fixture proxy',
             'unmatched_mainland_ip': 'hmxx-cn-cidr DIRECT', 'failed_updates': failed,
             'existing_connection_survived': True}
     finally:
@@ -210,17 +214,20 @@ with tempfile.TemporaryDirectory(prefix='clash-cn-rules-smoke-') as temporary:
         'external-controller': f'127.0.0.1:{controller}',
         'proxies': [{'name': 'smoke-upstream', 'type': 'http', 'server': hostport.hostname, 'port': hostport.port}],
         'proxy-groups': [{'name': 'smoke-proxy', 'type': 'select', 'proxies': ['smoke-upstream']}],
-        'rules': ['DOMAIN,overseas.validation.hmxxgit.org,smoke-proxy', 'MATCH,smoke-proxy']
+        'rules': ['DOMAIN,overseas.validation.hmxxgit.org,smoke-proxy',
+                  'DOMAIN-SUFFIX,google.com,smoke-proxy', 'DOMAIN-SUFFIX,youtube.com,smoke-proxy',
+                  'MATCH,smoke-proxy']
     }
     merge = json.loads(subprocess.check_output([
         args.ruby, '-r', 'yaml', '-r', 'json', '-e',
         'puts JSON.generate(YAML.load_file(ARGV[0]))', str(root/'global-merge.yaml')]))
-    fixture.update(merge)
+    if args.adapter == 'global-script.js': fixture.update(merge)
+    else: fixture['dns'] = {}
     # Override only the test DNS port; use all other committed DNS settings.
     dns_port = free_port()
     fixture['dns']['listen'] = f'127.0.0.1:{dns_port}'
     js = "const fs=require('fs');eval(fs.readFileSync(process.argv[1],'utf8'));process.stdout.write(JSON.stringify(main(JSON.parse(fs.readFileSync(0,'utf8')),'smoke')));"
-    config = json.loads(subprocess.check_output([args.node, '-e', js, str(root/'global-script.js')], input=json.dumps(fixture).encode()))
+    config = json.loads(subprocess.check_output([args.node, '-e', js, str(root/args.adapter)], input=json.dumps(fixture).encode()))
 
     def download(item):
         name, provider = item
@@ -284,7 +291,7 @@ with tempfile.TemporaryDirectory(prefix='clash-cn-rules-smoke-') as temporary:
                 raise RuntimeError('Managed rules were not prepended before MATCH')
             final = api('/providers/rules')['providers']
             dns_results = {}
-            for domain in ['www.baidu.com', 'www.google.com']:
+            for domain in ['www.baidu.com', 'www.google.com', 'www.youtube.com']:
                 answer = api('/dns/query?name='+domain+'&type=A')
                 addresses = [a['data'] for a in answer.get('Answer', []) if a.get('type') == 1]
                 if answer.get('Status') != 0 or not addresses:
@@ -323,7 +330,7 @@ with tempfile.TemporaryDirectory(prefix='clash-cn-rules-smoke-') as temporary:
             if not excluded or any(ip.startswith('198.18.') for ip in excluded):
                 raise RuntimeError('Fake-IP excluded domain did not return a real address')
             report = {
-                'core_version': api('/version'), 'upstream_data': downloads,
+                'adapter': args.adapter, 'core_version': api('/version'), 'upstream_data': downloads,
                 'rule_counts': {name: final[name]['ruleCount'] for name in config['rule-providers']},
                 'first_rule': live_rules[0], 'last_rule': live_rules[-1],
                 'forced_online_refresh': 'all four returned success',

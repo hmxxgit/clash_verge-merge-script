@@ -1,2 +1,6 @@
 .DS_Store
 .validation/
+node_modules/
+*.private.yaml
+*.private.json
+__pycache__/

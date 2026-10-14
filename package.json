@@ -1,0 +1,14 @@
+{
+  "name": "hmxx-mihomo-config",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Shared Mihomo DNS and direct rules with client adapters",
+  "scripts": {
+    "build": "node tools/build.cjs",
+    "test": "node tools/build.cjs --check && node --test tests/*.test.cjs",
+    "compose": "node tools/compose.cjs"
+  },
+  "devDependencies": {
+    "js-yaml": "5.4.3"
+  }
+}

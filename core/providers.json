@@ -1,0 +1,28 @@
+{
+  "interval": 604800,
+  "baseUrl": "https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/",
+  "proxy": "GLOBAL",
+  "sources": [
+    [
+      "hmxx-cn-private",
+      "private",
+      "domain"
+    ],
+    [
+      "hmxx-cn-lan",
+      "lancidr",
+      "ipcidr"
+    ],
+    [
+      "hmxx-cn-direct",
+      "direct",
+      "domain"
+    ],
+    [
+      "hmxx-cn-cidr",
+      "cncidr",
+      "ipcidr"
+    ]
+  ],
+  "format": "yaml"
+}

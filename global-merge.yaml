@@ -1,7 +1,5 @@
-# 完整复制到 Clash Verge Rev → 全局扩展覆写配置（Merge）。
-# 搭配 global-script.js 使用；直连规则和每周更新由脚本管理。
-# 不在这里写 rules、代理组、节点、端口或 TUN 开关。
-
+# Generated from core/dns.yaml. GLOBAL Merge, paired with global-script.js.
+# 共享 DNS 与持久化默认值；不含 rules/节点/代理组/端口/TUN/mode。
 # 对多个解析结果并发拨号。
 tcp-concurrent: true
 
@@ -12,8 +10,7 @@ profile:
 
 dns:
   enable: true
-  # 仅监听本机；开启 DNS 监听本身不等于开启系统 DNS 接管。
-  listen: "127.0.0.1:1053"
+  # listen 由客户端或原始配置管理；共享层不绑定任何 DNS 监听端口。
   # 当前方案优先 IPv4；Clash 的 DNS IPv6 设置可能覆盖这一项。
   ipv6: false
 

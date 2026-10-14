@@ -3,15 +3,14 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const { execFileSync } = require('node:child_process');
+const yaml = require('js-yaml');
 const source = fs.readFileSync(path.join(__dirname, '..', 'global-script.js'), 'utf8');
 function apply(config) {
   return vm.runInNewContext(source + '\nmain(config, "test");', { config }, { timeout: 1000 });
 }
 const plain = value => JSON.parse(JSON.stringify(value));
 const cidr = 'RULE-SET,hmxx-cn-cidr,DIRECT';
-const merge = JSON.parse(execFileSync(process.env.RUBY || 'ruby', ['-ryaml', '-rjson', '-e',
-  'puts JSON.generate(YAML.load_file(ARGV[0]))', path.join(__dirname, '..', 'global-merge.yaml')], { encoding: 'utf8' }));
+const merge = yaml.load(fs.readFileSync(path.join(__dirname, '..', 'global-merge.yaml'), 'utf8'));
 
 test('prepends domain exceptions without deleting any subscription rule, including duplicates', () => {
   const original = ['MATCH,Airport', 'RULE-SET,hmxx-cn-direct,DIRECT',
