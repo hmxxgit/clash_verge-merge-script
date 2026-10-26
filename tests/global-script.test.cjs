@@ -27,12 +27,13 @@ test("保留节点、provider、代理组、测速设置及其他顶层字段", 
     "mixed-port": 7890,
     proxies: [
       { name: "域名节点", type: "ss", server: "node.example.com", port: 443 },
-      { name: "IP 节点", type: "ss", server: "203.0.113.8", port: 443 }
+      { name: "IP 节点", type: "ss", server: "203.0.113.8", port: 443 },
+      { name: "IPv6 字面量节点", type: "ss", server: "2001:db8::1", port: 443 }
     ],
     "proxy-providers": { airport: { type: "http", url: "https://example.com/sub" } },
     "proxy-groups": [
       { name: "自动选择", type: "url-test", url: "https://www.gstatic.com/generate_204", interval: 300, timeout: 5000, proxies: ["域名节点"] },
-      { name: "故障转移", type: "fallback", url: "https://cp.cloudflare.com/generate_204", proxies: ["IP 节点"] }
+      { name: "故障转移", type: "fallback", url: "https://cp.cloudflare.com/generate_204", proxies: ["IP 节点", "IPv6 字面量节点"] }
     ],
     rules: ["MATCH,自动选择"]
   };
@@ -49,7 +50,6 @@ test("插入局域网和代表性国内直连规则，不误匹配国外域名",
     assert.ok(result.rules.includes(`DOMAIN-SUFFIX,${domain},DIRECT`));
   }
   assert.ok(result.rules.includes("IP-CIDR,192.168.0.0/16,DIRECT,no-resolve"));
-  assert.ok(result.rules.includes("IP-CIDR6,fc00::/7,DIRECT,no-resolve"));
   assert.ok(!result.rules.some(rule => rule.startsWith("DOMAIN-KEYWORD")));
   assert.ok(!result.rules.includes("DOMAIN-SUFFIX,youtube.com,DIRECT"));
   assert.deepEqual(result.rules.slice(-2), ["DOMAIN-SUFFIX,youtube.com,机场", "MATCH,机场"]);
@@ -77,10 +77,37 @@ test("缺失或错误类型的 rules 可恢复，重复执行保持幂等", () =
   }
 });
 
+test("强制顶层和 DNS 使用 IPv4-only，重复执行不会重新开启 IPv6", () => {
+  for (const fixture of [
+    {},
+    { ipv6: true, dns: { ipv6: true } },
+    { ipv6: false, dns: { ipv6: false } }
+  ]) {
+    const once = apply(fixture);
+    assert.equal(once.ipv6, false);
+    assert.equal(once.dns.ipv6, false);
+    const twice = apply(plain(once));
+    assert.equal(twice.ipv6, false);
+    assert.equal(twice.dns.ipv6, false);
+    assert.deepEqual(twice, once);
+  }
+});
+
+test("保留 IPv6 字面量节点和订阅已有的 IPv6 规则", () => {
+  const node = { name: "IPv6-only", type: "ss", server: "2001:db8::8", port: 443 };
+  const rules = ["IP-CIDR6,2001:db8::/32,DIRECT,no-resolve", "MATCH,机场"];
+  const result = apply({ ipv6: true, dns: { ipv6: true }, proxies: [node], rules });
+  assert.deepEqual(result.proxies, [node]);
+  assert.deepEqual(result.rules.slice(-rules.length), rules);
+  assert.equal(result.ipv6, false);
+  assert.equal(result.dns.ipv6, false);
+});
+
 test("DNS 国内外分流、节点解析与 Fake-IP 配置正确", () => {
   const result = apply({ rules: ["MATCH,机场"] });
   const dns = result.dns;
   assert.equal(dns.enable, true);
+  assert.equal(dns.ipv6, false);
   assert.equal(dns["enhanced-mode"], "fake-ip");
   assert.equal(dns["fake-ip-range"], "198.18.0.1/16");
   assert.equal(dns["respect-rules"], true);

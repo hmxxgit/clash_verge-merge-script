@@ -1,4 +1,4 @@
-// Clash Verge Rev 全局扩展脚本：仅调整 DNS 和规则。
+// Clash Verge Rev 全局扩展脚本：仅调整 IPv6、DNS 和规则。
 
 const LAN_RULES = [
   "DOMAIN,localhost,DIRECT",
@@ -10,10 +10,7 @@ const LAN_RULES = [
   "IP-CIDR,100.64.0.0/10,DIRECT,no-resolve",
   "IP-CIDR,169.254.0.0/16,DIRECT,no-resolve",
   "IP-CIDR,172.16.0.0/12,DIRECT,no-resolve",
-  "IP-CIDR,192.168.0.0/16,DIRECT,no-resolve",
-  "IP-CIDR6,::1/128,DIRECT,no-resolve",
-  "IP-CIDR6,fc00::/7,DIRECT,no-resolve",
-  "IP-CIDR6,fe80::/10,DIRECT,no-resolve"
+  "IP-CIDR,192.168.0.0/16,DIRECT,no-resolve"
 ];
 
 // 只保留常用服务的代表性域名，不维护大而重复的 CDN 清单。
@@ -98,6 +95,7 @@ function mergeDns(oldDns) {
     ? dns["nameserver-policy"] : {};
 
   dns.enable = true;
+  dns.ipv6 = false;
   dns["enhanced-mode"] = "fake-ip";
   dns["fake-ip-range"] = "198.18.0.1/16";
   dns["fake-ip-filter-mode"] = "blacklist";
@@ -130,6 +128,7 @@ function main(config) {
   if (!config || typeof config !== "object" || Array.isArray(config)) {
     throw new Error("配置必须是对象");
   }
+  config.ipv6 = false;
   config.dns = mergeDns(config.dns);
   config.rules = mergeRules(config.rules);
   return config;
