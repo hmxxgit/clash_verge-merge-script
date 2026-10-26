@@ -1,106 +1,122 @@
-const { test } = require('node:test');
-const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
-const vm = require('node:vm');
-const yaml = require('js-yaml');
-const source = fs.readFileSync(path.join(__dirname, '..', 'global-script.js'), 'utf8');
-function apply(config) {
-  return vm.runInNewContext(source + '\nmain(config, "test");', { config }, { timeout: 1000 });
-}
+const { test } = require("node:test");
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+const vm = require("node:vm");
+
+const source = fs.readFileSync(path.join(__dirname, "..", "global-script.js"), "utf8");
+const script = new vm.Script(source + "\nmain(config);");
 const plain = value => JSON.parse(JSON.stringify(value));
-const cidr = 'RULE-SET,hmxx-cn-cidr,DIRECT';
-const merge = yaml.load(fs.readFileSync(path.join(__dirname, '..', 'global-merge.yaml'), 'utf8'));
 
-test('prepends domain exceptions without deleting any subscription rule, including duplicates', () => {
-  const original = ['MATCH,Airport', 'RULE-SET,hmxx-cn-direct,DIRECT',
-    'DOMAIN-SUFFIX,baidu.com,DIRECT', 'DOMAIN-SUFFIX, youtube.com,Airport',
-    'DOMAIN-SUFFIX , baidu.com , DIRECT'];
-  const result = apply({ rules: original });
-  assert.equal(result.rules[0], 'RULE-SET,hmxx-cn-private,DIRECT');
-  assert.ok(result.rules.indexOf('DOMAIN-SUFFIX,baidu.com,DIRECT') < result.rules.indexOf('MATCH,Airport'));
-  assert.deepEqual(plain(result.rules.slice(123).filter(r => r !== cidr)), original);
+function apply(config) {
+  return plain(script.runInNewContext({ config }, { timeout: 1000 }));
+}
+
+test("脚本语法有效、入口可调用且没有运行时依赖", () => {
+  assert.doesNotThrow(() => new vm.Script(source));
+  assert.doesNotMatch(source, /\brequire\s*\(|\bimport\s*(?:\(|[\s{*])/);
+  const result = apply({});
+  assert.equal(typeof result, "object");
+  assert.throws(() => apply(null), /配置必须是对象/);
 });
 
-test('CN IP fallback follows all original specific rules and precedes the first MATCH', () => {
-  for (const rules of [
-    ['DOMAIN-SUFFIX,google.com,Airport', 'IP-CIDR,1.0.0.0/8,Airport', 'MATCH,Airport'],
-    ['IP-CIDR,1.0.0.0/8,Airport', 'DOMAIN-SUFFIX,google.com,Airport', 'MATCH,DIRECT'],
-    ['MATCH,Airport', 'DOMAIN-SUFFIX,google.com,Airport', 'MATCH,DIRECT'],
-    ['DOMAIN-SUFFIX,google.com,Airport'], []
-  ]) {
-    const result = plain(apply({ rules }));
-    const expected = rules.slice();
-    const match = expected.findIndex(r => r.startsWith('MATCH,'));
-    expected.splice(match < 0 ? expected.length : match, 0, cidr);
-    assert.deepEqual(result.rules.slice(123), expected);
-  }
-});
-
-test('is idempotent for absent rules, duplicate originals and serialized configs', () => {
-  for (const fixture of [{}, { rules: [] }, { rules: ['MATCH,Proxy'] },
-    { rules: [cidr, 'MATCH,DIRECT', 'DOMAIN,localhost,DIRECT'] }]) {
-    const once = plain(apply(fixture));
-    assert.deepEqual(plain(apply(plain(once))), once);
-    const snapshot = JSON.stringify(once);
-    assert.equal(JSON.stringify(apply(once)), snapshot);
-    const providers = Object.values(once['rule-providers']);
-    assert.equal(providers.length, 4);
-    assert.ok(providers.every(p => p.interval === 604800 && p.format === 'yaml' && p.path.endsWith('.yaml')));
-  }
-});
-
-test('preserves mode, TUN, ports, nodes, groups, unrelated DNS and existing providers', () => {
+test("保留节点、provider、代理组、测速设置及其他顶层字段", () => {
   const config = {
-    mode: 'rule', tun: { enable: false }, 'mixed-port': 9999,
-    dns: { enable: true, nameserver: ['https://example.net/dns-query'], 'nameserver-policy': { '+.custom.test': 'system' } },
-    proxies: [{ name: 'AirportNode', type: 'socks5', server: '127.0.0.1', port: 1080 }],
-    'proxy-groups': [{ name: 'Airport', type: 'select', proxies: ['AirportNode'] }],
-    'rule-providers': { subscription: { type: 'inline', behavior: 'domain', payload: ['+.example.net'] } },
-    rules: ['RULE-SET,subscription,Airport', 'MATCH,Airport']
+    mode: "rule",
+    tun: { enable: false },
+    "mixed-port": 7890,
+    proxies: [
+      { name: "域名节点", type: "ss", server: "node.example.com", port: 443 },
+      { name: "IP 节点", type: "ss", server: "203.0.113.8", port: 443 }
+    ],
+    "proxy-providers": { airport: { type: "http", url: "https://example.com/sub" } },
+    "proxy-groups": [
+      { name: "自动选择", type: "url-test", url: "https://www.gstatic.com/generate_204", interval: 300, timeout: 5000, proxies: ["域名节点"] },
+      { name: "故障转移", type: "fallback", url: "https://cp.cloudflare.com/generate_204", proxies: ["IP 节点"] }
+    ],
+    rules: ["MATCH,自动选择"]
   };
-  const original = plain(config), result = plain(apply(config));
-  for (const key of ['mode', 'dns', 'tun', 'mixed-port', 'proxies', 'proxy-groups']) assert.deepEqual(result[key], original[key]);
-  assert.deepEqual(result['rule-providers'].subscription, original['rule-providers'].subscription);
-  assert.deepEqual(result.rules.slice(123).filter(r => r !== cidr), original.rules);
+  const before = plain(config);
+  const result = apply(config);
+  for (const key of ["mode", "tun", "mixed-port", "proxies", "proxy-providers", "proxy-groups"]) {
+    assert.deepEqual(result[key], before[key]);
+  }
 });
 
-test('preserves colliding providers, uses independent cache paths and remains idempotent', () => {
-  const input = plain(merge);
-  input['rule-providers'] = Object.fromEntries(['private', 'lan', 'direct', 'cidr'].map(n => [
-    'hmxx-cn-' + n, { type: 'inline', behavior: 'domain', payload: ['+.subscription.test'] }
-  ]));
-  input.rules = ['RULE-SET,hmxx-cn-direct,DIRECT', 'MATCH,DIRECT'];
-  const existing = plain(input['rule-providers']);
-  const result = plain(apply(input));
-  for (const [key, value] of Object.entries(existing)) assert.deepEqual(result['rule-providers'][key], value);
-  assert.equal(Object.keys(result['rule-providers']).length, 8);
-  assert.equal(new Set(Object.values(result['rule-providers']).filter(p => p.path).map(p => p.path)).size, 4);
-  assert.ok(result.dns['nameserver-policy']['rule-set:hmxx-cn-direct-2']);
-  assert.deepEqual(plain(apply(plain(result))), result);
+test("插入局域网和代表性国内直连规则，不误匹配国外域名", () => {
+  const result = apply({ rules: ["DOMAIN-SUFFIX,youtube.com,机场", "MATCH,机场"] });
+  for (const domain of ["qq.com", "taobao.com", "douyin.com", "jd.com", "bilibili.com", "baidu.com", "zhihu.com", "12306.cn", "gov.cn"]) {
+    assert.ok(result.rules.includes(`DOMAIN-SUFFIX,${domain},DIRECT`));
+  }
+  assert.ok(result.rules.includes("IP-CIDR,192.168.0.0/16,DIRECT,no-resolve"));
+  assert.ok(result.rules.includes("IP-CIDR6,fc00::/7,DIRECT,no-resolve"));
+  assert.ok(!result.rules.some(rule => rule.startsWith("DOMAIN-KEYWORD")));
+  assert.ok(!result.rules.includes("DOMAIN-SUFFIX,youtube.com,DIRECT"));
+  assert.deepEqual(result.rules.slice(-2), ["DOMAIN-SUFFIX,youtube.com,机场", "MATCH,机场"]);
 });
 
-test('Merge then Script synchronizes exact/suffix DNS policies, never KEYWORD semantics', () => {
-  const input = plain(merge);
-  input.dns['nameserver-policy']['+.custom.test'] = 'system';
-  const result = plain(apply(input));
-  const policy = result.dns['nameserver-policy'];
-  const domestic = policy['rule-set:hmxx-cn-direct'];
-  for (const domain of ['doubao.com', 'qq.com', 'bilibili.com', 'wechat.com']) assert.deepEqual(policy['+.' + domain], domestic);
-  for (const name of ['doubao', '*doubao*', '+.doubao']) assert.equal(policy[name], undefined);
-  assert.equal(policy.localhost, 'system');
-  assert.equal(policy['+.local'], 'system');
-  assert.equal(policy['+.custom.test'], 'system');
-  assert.equal(policy['+.google.com'], undefined);
-  assert.ok(result.dns.nameserver.every(r => r.endsWith('#RULES')));
-  assert.ok(result.dns['proxy-server-nameserver'].every(r => r.endsWith('#DIRECT')));
-  assert.deepEqual(plain(apply(plain(result))), result);
+test("尊重订阅对同一匹配项的精确选择，并保留 MATCH 语义", () => {
+  const original = [
+    "DOMAIN-SUFFIX, qq.com ,机场",
+    "DOMAIN,internal.example,DIRECT",
+    "MATCH,机场",
+    "MATCH,DIRECT"
+  ];
+  const result = apply({ rules: original });
+  assert.equal(result.rules.filter(rule => /DOMAIN-SUFFIX,\s*qq\.com/i.test(rule)).length, 1);
+  assert.deepEqual(result.rules.slice(-original.length), original);
+  assert.equal(result.rules.filter(rule => rule.startsWith("MATCH,")).length, 2);
 });
 
-test('migrates the old generated IP prefix behind subscription domain rules', () => {
-  const original = ['DOMAIN,overseas.validation.hmxxgit.org,Airport', 'MATCH,Airport'];
-  const current = plain(apply({ rules: original }));
-  const old = plain(current);
-  old.rules = [...current.rules.slice(0, 123), cidr, ...original];
-  assert.deepEqual(plain(apply(old)), current);
+test("缺失或错误类型的 rules 可恢复，重复执行保持幂等", () => {
+  for (const fixture of [{}, { rules: null }, { rules: "MATCH,机场" }, { rules: [] }, { rules: ["MATCH,机场"] }]) {
+    const once = apply(fixture);
+    const twice = apply(plain(once));
+    assert.deepEqual(twice, once);
+    assert.equal(new Set(once.rules).size, once.rules.length);
+  }
+});
+
+test("DNS 国内外分流、节点解析与 Fake-IP 配置正确", () => {
+  const result = apply({ rules: ["MATCH,机场"] });
+  const dns = result.dns;
+  assert.equal(dns.enable, true);
+  assert.equal(dns["enhanced-mode"], "fake-ip");
+  assert.equal(dns["fake-ip-range"], "198.18.0.1/16");
+  assert.equal(dns["respect-rules"], true);
+  assert.equal(dns["prefer-h3"], false);
+  assert.ok(dns.nameserver.every(server => server.endsWith("#RULES")));
+  assert.ok(dns["proxy-server-nameserver"].every(server => server.endsWith("#DIRECT")));
+  assert.deepEqual(dns.fallback, []);
+  assert.ok(dns["nameserver-policy"]["+.qq.com"].every(server => server.endsWith("#DIRECT")));
+  assert.equal(dns["nameserver-policy"]["+.lan"], "system");
+  assert.ok(dns["fake-ip-filter"].includes("*.home.arpa"));
+  assert.equal(dns["direct-nameserver"], undefined);
+});
+
+test("保留 DNS 监听地址、未知字段、自定义 policy 和 blacklist 过滤项", () => {
+  const result = apply({
+    dns: {
+      listen: "127.0.0.1:1053",
+      "custom-option": { enabled: true },
+      "fake-ip-filter": ["printer.example"],
+      "nameserver-policy": { "+.corp.example": "system" },
+      "proxy-server-nameserver-policy": { "+.node.example": "223.5.5.5" },
+      "direct-nameserver": ["114.114.114.114"],
+      "direct-nameserver-follow-policy": true
+    }
+  });
+  assert.equal(result.dns.listen, "127.0.0.1:1053");
+  assert.deepEqual(result.dns["custom-option"], { enabled: true });
+  assert.ok(result.dns["fake-ip-filter"].includes("printer.example"));
+  assert.equal(result.dns["nameserver-policy"]["+.corp.example"], "system");
+  assert.deepEqual(result.dns["proxy-server-nameserver-policy"], { "+.node.example": "223.5.5.5" });
+  assert.equal(result.dns["direct-nameserver"], undefined);
+  assert.equal(result.dns["direct-nameserver-follow-policy"], undefined);
+});
+
+test("不把 whitelist 的旧过滤项错误合并到 blacklist", () => {
+  const result = apply({ dns: { "fake-ip-filter-mode": "whitelist", "fake-ip-filter": ["foreign.example"] } });
+  assert.equal(result.dns["fake-ip-filter-mode"], "blacklist");
+  assert.ok(!result.dns["fake-ip-filter"].includes("foreign.example"));
 });
